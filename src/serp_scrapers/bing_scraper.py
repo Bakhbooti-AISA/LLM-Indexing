@@ -4,34 +4,64 @@ import random
 import csv
 import requests
 from bs4 import BeautifulSoup
+from urllib.parse import urlparse
 
 delay_range = (1, 3)           # min/max delay between requests in seconds
 # ———————— #
 
+
+# A set of domains you know you want to skip
+EXCLUDED_DOMAINS = {
+    "www.zhihu.com",
+    "zhihu.com",
+    # add more if you keep seeing other Chinese sites
+}
+
 def fetch_bing_results(query, start, batch_size):
     headers = {
         "User-Agent": random.choice([
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
-            # add more UAs if you like
-        ])
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.1 Safari/605.1.15",
+        ]),
+        "Accept-Language": "en-PK,en;q=0.9",
     }
     params = {
         "q": query,
-        "first": start,        # 1-based index of first result
-        "count": batch_size    # number of results to return (max 50)
+        "first": start,
+        "count": batch_size,
+        "mkt": "en-PK",                           # Pakistan market, English UI
+        "cc": "PK",                               # Country code override
+        "setLang": "en",                          # Force English pages
+        "qft": "+filterui:language-LangEn",       # Bing UI filter for English
+        "ensearch": "1",                          # Enhanced search parsing
     }
-    resp = requests.get("https://www.bing.com/search", params=params, headers=headers, timeout=10)
+
+    resp = requests.get("https://www.bing.com/search",
+                        params=params,
+                        headers=headers,
+                        timeout=10)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, "html.parser")
 
     results = []
     for item in soup.select("li.b_algo"):
-        title = item.h2.get_text(strip=True) if item.h2 else None
-        link  = item.h2.a["href"] if item.h2 and item.h2.a else None
-        if title and link:
-            results.append((title, link))
+        h2 = item.find("h2")
+        if not h2 or not h2.a:
+            continue
+        title = h2.get_text(strip=True)
+        link  = h2.a["href"]
+
+        # programmatically skip excluded domains
+        domain = urlparse(link).netloc.lower()
+        if domain in EXCLUDED_DOMAINS:
+            print("Domain Excluded")
+            continue
+
+        results.append((title, link))
     return results
+
 
 def scrape_bing_to_csv(query, output_file, max_results, batch_size):
     # Remove existing file so each run starts fresh
