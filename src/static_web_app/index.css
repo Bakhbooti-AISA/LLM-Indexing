@@ -1,0 +1,112 @@
+body, html {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #fff;
+  color: #000;
+  font-family: 'Courier New', Courier, monospace;
+}
+
+.page-wrapper {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4rem 1rem; /* Top and bottom spacing */
+  box-sizing: border-box;
+}
+
+.container {
+  text-align: center;
+  padding: 2rem;
+  border: 2px solid #000;
+  max-width: 600px;
+  background-color: #fff;
+}
+
+.nav-buttons {
+  display: flex;
+  gap: 1rem;
+  margin-top: 2rem;
+  justify-content: center;
+}
+
+button {
+  font-size: 1.25rem;
+  padding: 1rem 2rem;
+  background-color: #fff;
+  color: #000;
+  border: 3px solid #000;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.2s ease-in-out;
+}
+
+button:hover {
+  background-color: #000;
+  color: #fff;
+}
+
+.book {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  margin: 2rem 0;
+  border-top: 1px solid #000;
+  padding-top: 1rem;
+}
+
+.book img {
+  width: 100px;
+  height: auto;
+  border: 2px solid #000;
+  filter: grayscale(100%);
+}
+
+.book h3 {
+  margin: 0 0 0.25rem 0;
+}
+
+.book p {
+  margin: 0.25rem 0;
+  text-align: left;
+}
+
+.blog-layout {
+  display: flex;
+  flex-direction: row;
+  gap: 2rem;
+  align-items: flex-start;
+}
+
+.sidebar {
+  width: 200px;
+  border-right: 2px solid #000;
+  padding-right: 1rem;
+}
+
+.sidebar h3 {
+  margin-top: 0;
+}
+
+.sidebar button {
+  display: block;
+  width: 100%;
+  margin-bottom: 0.5rem;
+  text-align: left;
+  background-color: #fff;
+  border: 2px solid #000;
+  padding: 0.5rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.sidebar button:hover {
+  background-color: #000;
+  color: #fff;
+}
+
+.article-content {
+  flex: 1;
+  text-align: left;
+}

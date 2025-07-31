@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blogs - Namaloom Frad</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin:0; padding:0; }
+    .blog-layout { display:flex; }
+    .sidebar { width:200px; padding:20px; background:#f4f4f4; }
+    .sidebar button { display:block; width:100%; margin-bottom:10px; }
+    .article-content { flex:1; padding:20px; }
+  </style>
+</head>
+<body>
+  <div class="page-wrapper blog-layout">
+    <div class="sidebar">
+      <h3>Articles</h3>
+    </div>
+    <div class="article-content">
+      <p>Select an article from the sidebar.</p>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      const sidebar = document.querySelector('.sidebar');
+      const articleContent = document.querySelector('.article-content');
+      axios.get('/api/articles')
+        .then(res => {
+          res.data.forEach(article => {
+            const btn = document.createElement('button');
+            btn.textContent = article.title;
+            btn.addEventListener('click', function() {
+              axios.get(`/api/articles/${article.id}`)
+                .then(res2 => {
+                  articleContent.innerHTML = `<h2>${res2.data.title}</h2><p>${res2.data.body}</p>`;
+                })
+                .catch(err => console.error('Failed to load article:', err));
+            });
+            sidebar.appendChild(btn);
+          });
+        })
+        .catch(err => console.error('Failed to load articles:', err));
+    });
+  </script>
+</body>
+</html>
