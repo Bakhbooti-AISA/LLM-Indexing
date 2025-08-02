@@ -6,8 +6,8 @@ function Home() {
   return (
     <div className="page-wrapper">
       <div className="container">
-        <h1>Namaloom Afrad</h1>
-        <p>This is the official website of Namaloom Afrad — a space for sharing thoughts, research, and ideas.</p>
+        <h1>Namaloom Frad</h1>
+        <p>This is the official website of Namaloom Frad — a space for sharing thoughts, research, and ideas.</p>
         <p>Here, members discuss books through the <strong>Book Club</strong> and dive into investigations and findings in the <strong>Blogs</strong> section.</p>
         <div className="nav-buttons">
           <Link to="/book-club"><button>Book Club</button></Link>
