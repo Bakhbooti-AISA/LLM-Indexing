@@ -14,14 +14,16 @@ python3 main.py --har-files dellsupport.har beetjuice.har -s google bing -m 500 
 - -s for selecting SE
 - -m for max index to scrap till
 - -i scrap batch size (dont go over 50 as results get a bit strages above that)
-- -o output dir
+- -o output 
+
+NOTE: For google scraping we use serper.dev API. Need to setup .env file to use. Check SERP Scrapers section for info
 
 
 #### SERP Web Scrapers
 
 They are two scraping tool:
 1. bing_scraper.py -> Uses python requests module to simply send a get request to bings search engien.
-2. google_scraper.py -> Uses serper.dev SERP API (needed to use an online servise as Googles website gardes against bots very strictly). Will have to create an account on there website to use (2500 free requests).
+2. google_scraper.py -> Uses serper.dev SERP API (needed to use an online servise as Googles website gardes against bots very strictly). Will have to create an account on there website to use (2500 free requests). Creat .env in root of dir with API_KEY="serper.api.from.your.account"
 
 #### LLM Web Interface Scrapers	
 
