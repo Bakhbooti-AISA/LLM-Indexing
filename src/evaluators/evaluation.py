@@ -83,12 +83,12 @@ def check_urls(csv_paths=None, txt_path='urls.txt', results_pathfile='results.tx
             if url in maps["exact"]:
                 matched.append((path, maps["exact"][url], "exact"))
         # 2) normalized
-        if not matched:
-            core, pathp = normalize_url(url)
-            for path, maps in csv_data.items():
-                hits = maps["norm"].get((core, pathp), [])
-                for hit_url, row in hits:
-                    matched.append((path, row, "normalized"))
+        # if not matched:
+        #     core, pathp = normalize_url(url)
+        #     for path, maps in csv_data.items():
+        #         hits = maps["norm"].get((core, pathp), [])
+        #         for hit_url, row in hits:
+        #             matched.append((path, row, "normalized"))
         if matched:
             found[url] = matched
         else:

@@ -4,6 +4,19 @@
 
 This project contains variouse tool useful for tracking and studiying LLM Websearch. The main content of the project can be found in the src file which contain the SERP web scrapers and LLM web interface scrapers.
 
+#### `main.py` Usage:
+
+Use help flag for all `main.py` params, but as a guide here is a example use 
+```bash
+python3 main.py --har-files dellsupport.har beetjuice.har -s google bing -m 500 -i 50 -o results
+``` 
+
+- -s for selecting SE
+- -m for max index to scrap till
+- -i scrap batch size (dont go over 50 as results get a bit strages above that)
+- -o output dir
+
+
 #### SERP Web Scrapers
 
 They are two scraping tool:
@@ -15,4 +28,6 @@ They are two scraping tool:
 #### Helpful Points
 - Query = Search engine search. User prompt = what user writes to the LLM. Technially "Query" can be used for both but for sake of code understanding, we can make the definitions as such.
 - An important note: very, Very, VERY much recomened to use a VPN or proxy while using SERP scrapers, as overuse can get your IP banned from the search engine.
+- `old_main.py` is deprecated, only there to be viewed for reference.
+- 
 
