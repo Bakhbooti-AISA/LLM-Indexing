@@ -33,17 +33,28 @@ def parse_args():
         '-o', '--output-dir', default='outputs',
         help='Directory to save query folders and results'
     )
+    parser.add_argument(
+        '-l', '--logs-print', default=False,
+        help='Directory to save query folders and results'
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    def printLog(toPrint):
+        if args.logs_print:
+            print(toPrint)
+
     # Ensure output directory
     os.makedirs(args.output_dir, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # Parse HAR files
     parsed_entries = har_parser(args.har_files)
+    printLog("All .har files parsed")
+    # return
 
     # Iterate over each HAR entry
     for entry in parsed_entries:
@@ -52,12 +63,15 @@ def main():
         folder = os.path.join(args.output_dir, f"{harname}_{timestamp}")
         os.makedirs(folder, exist_ok=True)
 
+        printLog("Running SERP on "+harname)
+
         # Scrape each search string
         for idx, query in enumerate(entry.get('search_strings', []), start=1):
             safe_q = query.replace(' ', '_')[:12]
             for engine in args.search_engines:
                 csv_path = os.path.join(folder, f"{harname}_{idx}_{engine}_{safe_q}.csv")
                 if engine == 'bing':
+                    printLog("Running bing for "+harname)
                     scrape_bing_to_csv(
                         query=query,
                         output_file=csv_path,
@@ -65,6 +79,7 @@ def main():
                         batch_size=args.index_interval
                     )
                 elif engine == 'google':
+                    printLog("Running Google for "+harname)
                     scrape_google_to_csv(
                         query=query,
                         output_file=csv_path,

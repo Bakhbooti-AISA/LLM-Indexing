@@ -220,7 +220,19 @@ def process_har_files(har_list: List[str], target_url: str) -> List[Dict[str, An
 
 def har_parser(har_list: List[str]) -> List[Dict[str, Any]]:
     """
-    Entry point: processes HAR files for the chatgpt conversation endpoint.
+    Entry point: processes HAR files for the chatgpt conversation endpoint
+    and prints totals of search strings and URLs.
     """
     target = "https://chatgpt.com/backend-api/f/conversation"
-    return process_har_files(har_list, target)
+    results = process_har_files(har_list, target)
+
+    # Summarize totals
+    total_searches = sum(len(r.get('search_strings', [])) for r in results if not r.get('error'))
+    total_urls = sum(len(r.get('url', [])) for r in results if not r.get('error'))
+    for r in results:
+        print(r.get('url'))
+        print(r.get('search_strings'))
+    print(f"Total search strings across all files: {total_searches}")
+    print(f"Total URLs across all files: {total_urls}")
+
+    return results
