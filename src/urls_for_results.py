@@ -1,95 +1,221 @@
 #!/usr/bin/env python3
 """
-Script to extract search strings and cited URLs from HAR files and place metadata files
-into their corresponding network-logs-prompt-* result directories based on prompt ID.
+Create per-results-folder query metadata from HARs (GPT-o4 & GPT-5).
 
-Usage:
-    python har_results_annotator.py --har-dir /path/to/har_dir \
-                                 --results-root /path/to/results_root
+Matching rule (timestamp ignored):
+  results/<category>/network-logs-prompt-<ID>_<ANY>/
+  -> datasets/<category>/*hars*/network-logs-prompt-<ID>.har
 
-For each HAR named:
-    network-logs-prompt-<ID>_<TIMESTAMP>.har
-it finds the directory under results_root starting with:
-    network-logs-prompt-<ID>_
-and writes `<har_basename>_meta.json` into that folder.
+We parse via chatgpt_scraper.har_parser.process_har_files and write:
+  <results_folder>/query_meta.json
+
+URL fields in the output are standardized to:
+  - accessed : normal/accessed URLs
+  - cites    : cited/given URLs
 """
-import os
+
+import re
 import json
 import argparse
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Placeholder imports; replace with your implementations
-from chatgpt_scraper.har_parser import parse_entry, parse_sse_stream, extract_search_queries, extract_urls
+# Use your current parser helpers
+from chatgpt_scraper.har_parser import process_har_files
+
+# Match result subdirs like: network-logs-prompt-249 or network-logs-prompt-249_20250814_011917
+RESULTS_DIR_PATTERN = re.compile(r"^network-logs-prompt-(?P<prompt_id>\d+)(?:_.*)?$", re.I)
 
 
-def process_har_file(har_path: str) -> Dict[str, Any]:
+def find_har_for_results_dir(
+    rdir: Path,
+    results_root: Path,
+    datasets_root: Optional[Path],
+    prompt_id: str,
+) -> List[Path]:
     """
-    Process a single HAR file to extract search_strings and cited_urls.
+    Return [<exact har path>] or [].
+
+    Mapping (timestamp ignored):
+      results/<category>/network-logs-prompt-<ID>_<ANY>/
+      -> datasets/<category>/*hars*/network-logs-prompt-<ID>.har
     """
+    # Determine <category> from results path
     try:
-        with open(har_path, 'r', encoding='utf-8') as f:
-            har = json.load(f)
-        entries = har.get('entries') or har.get('log', {}).get('entries', [])
-        target = next(
-            (e for e in entries if e.get('request', {}).get('url', '').endswith('/conversation')),
-            None
-        )
-        if not target:
-            raise ValueError("No conversation entry found in HAR")
+        rel = rdir.relative_to(results_root)
+        category = rel.parts[0] if rel.parts else rdir.parent.name
+    except Exception:
+        category = rdir.parent.name
 
-        metrics = parse_entry(target)
-        events = parse_sse_stream(metrics.get('content_text', ''))
-        queries = extract_search_queries(events)
-        _, _, _, cited = extract_urls(events)
+    # Search datasets/<category>/*hars*/network-logs-prompt-<ID>.har
+    if datasets_root:
+        cat_dir = datasets_root / category
+        if cat_dir.exists():
+            har_dirs = [p for p in cat_dir.iterdir() if p.is_dir() and "hars" in p.name.lower()]
 
-        return {'search_strings': queries, 'cited_urls': cited}
-    except Exception as e:
-        return {'error': str(e)}
+            # Prefer *_gpt-5* dir when category hints GPT-5
+            prefer_gpt5 = ("gpt-5" in category.lower()) or ("gpt5" in category.lower())
+
+            def sort_key(p: Path):
+                n = p.name.lower()
+                # if prefer_gpt5: put non-gpt dirs later
+                return (prefer_gpt5 and not ("gpt" in n), n)
+
+            for hd in sorted(har_dirs, key=sort_key):
+                hp = hd / f"network-logs-prompt-{prompt_id}.har"
+                if hp.exists():
+                    return [hp.resolve()]
+
+    # Fallbacks (rare): look inside the results folder or its parent category folder
+    local = rdir / f"network-logs-prompt-{prompt_id}.har"
+    if local.exists():
+        return [local.resolve()]
+
+    parent_local = rdir.parent / f"network-logs-prompt-{prompt_id}.har"
+    if parent_local.exists():
+        return [parent_local.resolve()]
+
+    return []
 
 
-def find_matching_dir(results_root: str, base_name: str) -> str:
-    """
-    Given a HAR base name like 'network-logs-prompt-39_20250805_025105',
-    find a directory under results_root that starts with 'network-logs-prompt-39_'.
-    Returns the full path or an empty string if not found.
-    """
-    # Extract prefix up to the first underscore
-    prefix = base_name.split('_', 1)[0] + '_'
-    for entry in os.listdir(results_root):
-        full_path = os.path.join(results_root, entry)
-        if os.path.isdir(full_path) and entry.startswith(prefix):
-            return full_path
-    return ''
+def aggregate_results(har_paths: List[Path], version: str) -> Dict[str, Any]:
+    """Run your parser and normalize fields → accessed / cites."""
+    if not har_paths:
+        return {"hars": [], "error": "No HARs found"}
 
+    parsed: List[Dict[str, Any]] = process_har_files(
+        [str(p) for p in har_paths],
+        target_url="https://chatgpt.com/backend-api/f/conversation",
+    )
 
-def main(har_dir: str, results_root: str):
-    har_files = [os.path.join(har_dir, fn)
-                 for fn in os.listdir(har_dir)
-                 if fn.lower().endswith(('.har', '.json'))]
-    if not har_files:
-        print(f"No HAR files found in {har_dir}")
-        return
+    all_search_strings: List[str] = []
+    all_accessed: List[str] = []
+    all_cites: List[str] = []
+    total_accessed = 0
+    total_cites = 0
 
-    for har_path in har_files:
-        base = os.path.splitext(os.path.basename(har_path))[0]
-        target_dir = find_matching_dir(results_root, base)
-        if not target_dir:
-            print(f"Warning: no matching results folder for {base} under {results_root}")
+    per_har: List[Dict[str, Any]] = []
+    for r in parsed:
+        if r.get("error"):
+            per_har.append({"harname": r.get("harname"), "error": r["error"]})
             continue
 
-        meta = process_har_file(har_path)
-        out_filename = f"{base}_meta.json"
-        out_path = os.path.join(target_dir, out_filename)
-        with open(out_path, 'w', encoding='utf-8') as outf:
-            json.dump(meta, outf, indent=2)
-        print(f"Wrote metadata to {out_path}")
+        # Map to standardized names
+        sstrings = r.get("search_strings", []) or []
+        accessed = r.get("url", []) or []       # previously normal/accessed
+        cites = r.get("cited_url", []) or []    # previously given/cited
+
+        total_accessed += int(r.get("n_accessed", 0) or 0)
+        total_cites += int(r.get("n_given", 0) or 0)
+
+        per_har.append({
+            "harname": r.get("harname"),
+            "search_strings": sstrings,
+            "accessed": accessed,
+            "cites": cites,
+            "n_accessed": r.get("n_accessed"),
+            "n_cites": r.get("n_given"),
+        })
+
+        for q in sstrings:
+            if q not in all_search_strings:
+                all_search_strings.append(q)
+        for u in accessed:
+            if u not in all_accessed:
+                all_accessed.append(u)
+        for u in cites:
+            if u not in all_cites:
+                all_cites.append(u)
+
+    return {
+        "version": version,
+        "total_hars": len(har_paths),
+        "totals": {
+            "unique_search_strings": len(all_search_strings),
+            "unique_accessed_urls": len(all_accessed),
+            "unique_cites": len(all_cites),
+            "accessed_count": total_accessed,
+            "cites_count": total_cites,
+        },
+        "search_strings": all_search_strings,
+        "accessed": all_accessed,
+        "cites": all_cites,
+        "hars": per_har,
+    }
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description="Annotate HARs with search strings and cited URLs into result dirs"
-    )
-    parser.add_argument('--har-dir', required=True, help='Directory containing HAR files')
-    parser.add_argument('--results-root', required=True, help='Root directory under which network-logs-prompt-* folders reside')
-    args = parser.parse_args()
-    main(args.har_dir, args.results_root)
+def detect_version_for_category(category: str) -> str:
+    """By default, use GPT-5 if the category name contains 'gpt-5'."""
+    return "gpt5" if ("gpt-5" in category.lower() or "gpt5" in category.lower()) else "gpt-o4"
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Create query_meta.json per results folder (GPT-o4 & GPT-5 aware).")
+    ap.add_argument("--results-root", required=True, help="Root of results tree (e.g., ./results)")
+    ap.add_argument("--datasets-root", required=True, help="Datasets root (e.g., ./datasets)")
+    ap.add_argument("--version", choices=["gpt-o4", "gpt5", "auto"], default="auto",
+                    help="Parsing mode; 'auto' selects from category name")
+    ap.add_argument("--write-filename", default="query_meta.json",
+                    help="Output JSON filename placed in each results folder")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Print what would be written without creating files")
+    args = ap.parse_args()
+
+    results_root = Path(args.results_root).resolve()
+    datasets_root = Path(args.datasets_root).resolve()
+
+    if not results_root.exists():
+        raise SystemExit(f"results_root does not exist: {results_root}")
+    if not datasets_root.exists():
+        raise SystemExit(f"datasets_root does not exist: {datasets_root}")
+
+    # Find all network-logs-prompt-* folders (any timestamp variant)
+    result_dirs: List[Path] = []
+    for p in results_root.rglob("*"):
+        if p.is_dir() and RESULTS_DIR_PATTERN.match(p.name):
+            result_dirs.append(p)
+
+    if not result_dirs:
+        print(f"No results folders matching 'network-logs-prompt-*' under {results_root}")
+        return
+
+    print(f"Found {len(result_dirs)} results folders.")
+
+    for rdir in sorted(result_dirs):
+        m = RESULTS_DIR_PATTERN.match(rdir.name)
+        assert m
+        prompt_id = m.group("prompt_id")
+
+        # Derive category for version and datasets path
+        try:
+            rel = rdir.relative_to(results_root)
+            category = rel.parts[0] if rel.parts else rdir.parent.name
+        except Exception:
+            category = rdir.parent.name
+
+        # Version selection
+        version = detect_version_for_category(category) if args.version == "auto" else args.version
+
+        # Determine the single HAR for this results dir
+        har_paths = find_har_for_results_dir(rdir, results_root, datasets_root, prompt_id)
+
+        summary = aggregate_results(har_paths, version)
+        out_path = rdir / args.write_filename
+        payload = {
+            "prompt_id": int(prompt_id),
+            "category": category,
+            "results_folder": str(rdir),
+            **summary
+        }
+
+        if args.dry_run:
+            print(f"\n[{rdir}] Would write {args.write_filename} with {len(summary.get('hars', []))} HAR(s).")
+            print(json.dumps(payload, indent=2)[:1000] + ("...\n" if len(json.dumps(payload)) > 1000 else "\n"))
+        else:
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            print(f"Wrote {out_path}  (HARs: {len(summary.get('hars', []))}, ver: {version})")
+
+
+if __name__ == "__main__":
+    main()

@@ -110,6 +110,83 @@ EAST_COAST_ZIPCODES = [
     "32114",  # Daytona Beach, FL
 ]
 
+#### HELPER
+
+import base64
+from urllib.parse import urlparse, parse_qs, unquote, urlunparse, urlencode
+
+TRACKING_KEYS = {
+    "utm_source","utm_medium","utm_campaign","utm_term","utm_content",
+    "gclid","gbraid","wbraid","fbclid","msclkid","ocid","cvid","form","spm","ved","ei","oq","sxsrf","sca_esv","ntb"
+}
+
+def _drop_tracking_params(url: str) -> str:
+    try:
+        p = urlparse(url)
+        q = parse_qs(p.query, keep_blank_values=True)
+        q = {k: v for k, v in q.items() if k not in TRACKING_KEYS and not k.startswith("utm_")}
+        return urlunparse((p.scheme, p.netloc, p.path, p.params, urlencode(q, doseq=True), p.fragment))
+    except Exception:
+        return url
+
+def _maybe_b64_decode(s: str) -> str:
+    # Some Bing values are like a1<base64-no-padding>
+    if s.startswith(("a0","a1","a2","a3","a")):
+        s = s[2:] if s[1:].isalnum() else s[1:]  # strip a?, be tolerant
+    # add padding
+    pad = (-len(s)) % 4
+    try:
+        return base64.b64decode(s + ("=" * pad)).decode("utf-8", errors="strict")
+    except Exception:
+        return s
+
+def resolve_bing_redirect(href: str) -> str:
+    """
+    Turn Bing/MSN redirect URLs into the final destination.
+    Handles:
+      - https://www.bing.com/ck/a?...&u=<base64 or encoded target>
+      - https://r.msn.com/... ?ru=<target>
+      - https://go.msn.com/... ?target=<target> / ?ru=<target>
+    Also strips common tracking params.
+    """
+    try:
+        # print(href)
+        p = urlparse(href)
+        host = p.netloc.lower()
+
+        # If it’s already not a Bing/MSN redirector, just clean and return
+        if "bing.com" not in host and "msn.com" not in host:
+            return _drop_tracking_params(href)
+
+        q = parse_qs(p.query, keep_blank_values=True)
+        candidate = q.get("u", [None])[0] or q.get("ru", [None])[0] or q.get("target", [None])[0] or q.get("url", [None])[0]
+        # print(candidate)
+
+        if candidate:
+            # First try URL-decoding; if it doesn't look like a URL, try base64
+            cand_dec = unquote(candidate)
+            if not cand_dec.startswith(("http://", "https://")):
+                cand_dec = _maybe_b64_decode(candidate)
+                # print("b64")
+            if cand_dec.startswith(("http://", "https://")):
+                # print(cand_dec)
+                return _drop_tracking_params(cand_dec)
+
+
+        # Fallback: sometimes the only http(s) appears percent-encoded in the query
+        from re import search
+        m = search(r"(https?%3A%2F%2F[^&]+)", p.query)
+        if m:
+            return _drop_tracking_params(unquote(m.group(1)))
+
+        return _drop_tracking_params(href)
+    except Exception:
+        return href
+
+
+
+####
+
 # # Initialize a single RealtimeClient for all requests
 # client = RealtimeClient(OXY_USERNAME, OXY_PASSWORD)
 # # —————————————————————— #
@@ -182,10 +259,12 @@ def fetch_bing_results(query, start, batch_size):
     params = urllib.parse.urlencode({
         "api_key": WSA_API_KEY,
         "url": bing_url,
-        "country": "us",
+        "render_js": False,
+        "country": "pk",
     })
     conn.request("GET", f"/v2?{params}")
     resp = conn.getresponse()
+    # print(resp)
 
     # if resp.status != 200:
     #     print(f"Error fetching from WebScrapingAPI: HTTP {resp.status}")
@@ -193,6 +272,7 @@ def fetch_bing_results(query, start, batch_size):
 
     html = resp.read().decode("utf-8")
     soup = BeautifulSoup(html, "html.parser")
+    # print(html)
 
     results = []
     # Bing’s organic results are in <li class="b_algo">
@@ -201,7 +281,10 @@ def fetch_bing_results(query, start, batch_size):
         if not h2 or not h2.a:
             continue
         title = h2.get_text(strip=True)
-        link  = h2.a["href"]
+        raw_link = h2.a.get("href", "")
+
+        # convert Bing redirect to the real URL
+        link = resolve_bing_redirect(raw_link)
 
         # domain exclusion
         domain = urlparse(link).netloc.lower()
@@ -220,7 +303,7 @@ def scrape_bing_to_csv(query, output_file, max_results, batch_size):
     if os.path.exists(output_file):
         os.remove(output_file)
 
-    ## OVERRIDE USER
+    # # OVERRIDE USER
     # batch_size=20
 
     total_written = 0

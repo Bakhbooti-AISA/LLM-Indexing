@@ -37,6 +37,10 @@ def parse_args():
         '-l', '--logs-print', default=False,
         help='Directory to save query folders and results'
     )
+    parser.add_argument(
+        '--gpt5', default=False,
+        help='Flag if using gpt5'
+    )
     return parser.parse_args()
 
 
@@ -52,23 +56,45 @@ def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # Parse HAR files
+    model = None
+    if args.gpt5:
+        model = 'gpt5'
+    else:
+        model = 'gpt-o4'
     parsed_entries = har_parser(args.har_files)
+    # parsed_entries = har_parser(args.har_files)
     printLog("All .har files parsed")
     # return
 
+    import glob
+    from tqdm import tqdm
+
+
     # Iterate over each HAR entry
-    for entry in parsed_entries:
+    for entry in tqdm(parsed_entries, desc="HAR entries"):
         harname = os.path.splitext(os.path.basename(entry['harname']))[0]
-        # Folder per HAR
-        folder = os.path.join(args.output_dir, f"{harname}_{timestamp}")
-        os.makedirs(folder, exist_ok=True)
+
+        # Check for an existing folder matching pattern: harname_*
+        pattern = os.path.join(args.output_dir, f"{harname}_*")
+        existing_folders = glob.glob(pattern)
+
+        if existing_folders:
+            # If a folder exists, just use the first one found (or you can choose by sorting)
+            folder = existing_folders[0]
+        else:
+            # Otherwise, create a new one with timestamp
+            folder = os.path.join(args.output_dir, f"{harname}_{timestamp}")
+            os.makedirs(folder, exist_ok=True)
 
         printLog("Running SERP on "+harname)
 
         # Scrape each search string
-        for idx, query in enumerate(entry.get('search_strings', []), start=1):
+        search_strings = entry.get('search_strings', [])
+        for idx, query in enumerate(tqdm(search_strings, desc=f"Queries ({harname})"), start=1):
             safe_q = query.replace(' ', '_')[:12]
-            for engine in args.search_engines:
+            safe_q = safe_q.replace('\\', '_')[:12]
+            safe_q = safe_q.replace('/', '_')[:12]
+            for engine in tqdm(args.search_engines, desc="Search engines", leave=False):
                 csv_path = os.path.join(folder, f"{harname}_{idx}_{engine}_{safe_q}.csv")
                 if engine == 'bing':
                     printLog("Running bing for "+harname)
