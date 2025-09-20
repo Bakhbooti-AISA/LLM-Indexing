@@ -678,18 +678,347 @@ def process_har_files(har_list: List[str], target_url: str) -> List[Dict[str, An
             results.append({'harname': har_path, 'error': str(e)})
     return results
 
+# =========================
+# Claude Parser Functions
+# =========================
+
+from urllib.parse import urlparse
+import json
+import re
+from typing import Any, Dict, List, Tuple
+from pathlib import Path
+
+CLAUDE_COMPLETION_RE = re.compile(
+    r"^/api/organizations/[^/]+/chat_conversations/[^/]+/completion(?:$|\?)"
+)
+
+def find_and_parse_claude_completion(har_path: str) -> Dict[str, Any]:
+    """
+    Load a HAR file and find the first Claude completion entry
+    (org ID + chat ID don't need to be known).
+    Returns metrics dict including 'entry_index' and 'matched_url'.
+    Raises ValueError if not found.
+    """
+    with open(har_path, 'r', encoding='utf-8') as f:
+        har = json.load(f)
+
+    entries = har.get('entries') or har.get('log', {}).get('entries', [])
+    for idx, entry in enumerate(entries):
+        req = entry.get('request', {})
+        url = req.get('url') or ""
+        try:
+            p = urlparse(url)
+        except Exception:
+            continue
+        if p.netloc == "claude.ai" and CLAUDE_COMPLETION_RE.match(p.path):
+            metrics = parse_entry(entry)
+            metrics['entry_index'] = idx
+            metrics['matched_url'] = url
+            return metrics
+
+    raise ValueError("No Claude completion entry found in HAR.")
+
+
+def extract_claude_queries(parsed_events: List[Dict[str, Any]]) -> List[str]:
+    """
+    Extract web search queries from Claude SSE events.
+    Works whether the partial JSON decodes to a dict {"query": "..."}
+    or a list of dicts [{"query": "..."}].
+    """
+    queries: List[str] = []
+    buffer: List[str] = []
+    in_search_block = False
+
+    for ev in parsed_events:
+        payload = ev.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        t = payload.get("type")
+
+        if t == "content_block_start" and payload.get("content_block", {}).get("name") == "web_search":
+            in_search_block = True
+            buffer = []
+
+        elif in_search_block and t == "content_block_delta":
+            delta = payload.get("delta", {})
+            if delta.get("type") == "input_json_delta":
+                part = delta.get("partial_json")
+                if isinstance(part, str):
+                    buffer.append(part)
+
+        elif in_search_block and t == "content_block_stop":
+            joined = "".join(buffer).strip()
+            if joined:
+                try:
+                    obj = json.loads(joined)
+                    if isinstance(obj, dict):
+                        q = obj.get("query")
+                        if q:
+                            queries.append(q.strip())
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            if isinstance(item, dict) and "query" in item:
+                                q = item["query"]
+                                if q:
+                                    queries.append(q.strip())
+                except json.JSONDecodeError:
+                    pass
+            in_search_block = False
+            buffer = []
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for q in queries:
+        if q not in seen:
+            seen.add(q)
+            deduped.append(q)
+
+    return deduped
+
+
+def count_urls_claude(parsed_events: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    """
+    From Claude SSE events:
+      - Accessed URLs: inside web_search tool_result blocks
+      - Cited  URLs:   inside answer text blocks via citation_start_delta (and any prefilled citations)
+
+    Returns (accessed_urls, cited_urls), both deduped with order preserved.
+    """
+    accessed: List[str] = []
+    cited: List[str] = []
+
+    # ---- helpers ----
+    def dedupe_keep_order(items: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for x in items:
+            if x and x not in seen:
+                seen.add(x)
+                out.append(x)
+        return out
+
+    def extract_urls_from_partial_json(chunks: List[str]) -> List[str]:
+        """Join partial_json fragments and pull any 'url' fields from list/dict payloads."""
+        if not chunks:
+            return []
+        joined = "".join(chunks).strip()
+        urls: List[str] = []
+        try:
+            obj = json.loads(joined)
+            if isinstance(obj, list):
+                for item in obj:
+                    if isinstance(item, dict) and "url" in item and item["url"]:
+                        urls.append(item["url"])
+            elif isinstance(obj, dict):
+                if "url" in obj and obj["url"]:
+                    urls.append(obj["url"])
+        except json.JSONDecodeError:
+            pass
+        return urls
+
+    # ---- state for accessed (tool_result) blocks ----
+    in_result_block = False
+    result_buffer: List[str] = []
+
+    # ---- state for answer (text) blocks ----
+    in_text_block = False
+
+    for ev in parsed_events:
+        payload = ev.get("payload")
+        if not isinstance(payload, dict):
+            continue
+
+        t = payload.get("type")
+
+        # ====== START blocks ======
+        if t == "content_block_start":
+            cb = payload.get("content_block", {}) or {}
+            cb_name = cb.get("name")
+            cb_type = cb.get("type")
+
+            # Accessed: web_search tool_result block
+            if cb_name == "web_search" and cb_type == "tool_result":
+                in_result_block = True
+                result_buffer = []
+
+            # Cited: text answer block; also consider any prefilled citations array
+            if cb_type == "text":
+                in_text_block = True
+                # If Claude pre-populated 'citations' in the start block
+                pre = cb.get("citations")
+                if isinstance(pre, list):
+                    for c in pre:
+                        if isinstance(c, dict):
+                            u = c.get("url")
+                            if u:
+                                cited.append(u)
+
+        # ====== DELTA blocks ======
+        elif t == "content_block_delta":
+            delta = payload.get("delta", {}) or {}
+            d_type = delta.get("type")
+
+            # Accessed: accumulate JSON pieces
+            if in_result_block and d_type == "input_json_delta":
+                part = delta.get("partial_json")
+                if isinstance(part, str):
+                    result_buffer.append(part)
+
+            # Cited: streaming citations during answer
+            if in_text_block and d_type == "citation_start_delta":
+                citation = delta.get("citation", {}) or {}
+                url = citation.get("url")
+                if url:
+                    cited.append(url)
+                # Some payloads also duplicate sources; include their URLs too
+                sources = citation.get("sources")
+                if isinstance(sources, list):
+                    for s in sources:
+                        if isinstance(s, dict):
+                            su = s.get("url")
+                            if su:
+                                cited.append(su)
+
+        # ====== STOP blocks ======
+        elif t == "content_block_stop":
+            # finalize accessed urls block
+            if in_result_block:
+                accessed.extend(extract_urls_from_partial_json(result_buffer))
+                in_result_block = False
+                result_buffer = []
+
+            # finalize text block
+            if in_text_block:
+                in_text_block = False
+
+        # (message_* events are ignored for URL extraction)
+
+    # Deduplicate with order preserved
+    # accessed = dedupe_keep_order(accessed)
+    cited = dedupe_keep_order(cited)
+
+    return accessed, cited
+
+
+MARKER = "[no answer captured]"
+
+def reconstruct_answer_from_sse(parsed_events):
+    """Concatenate all text_delta chunks from text content blocks, in order."""
+    buf = []
+    in_text_block = False
+    for ev in parsed_events:
+        payload = ev.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        t = payload.get("type")
+
+        if t == "content_block_start":
+            cb = (payload.get("content_block") or {})
+            if cb.get("type") == "text":
+                in_text_block = True
+
+        elif t == "content_block_delta" and in_text_block:
+            delta = payload.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text", "")
+                if text:
+                    buf.append(text)
+
+        elif t == "content_block_stop" and in_text_block:
+            in_text_block = False
+
+    return "".join(buf).strip()
+
+PROMPT_ID_RE = re.compile(r"network-logs-prompt-(\d+)\.har$", re.IGNORECASE)
+
+def response_txt_path_for_har(har_dir: Path, category: str, model: str, dataset_run: str, har_filename: str) -> Path:
+    """
+    Map:
+      ./<category>_{model}_{dataset_run}_1/<category>_hars_{model}_{dataset_run}_1/network-logs-prompt-<id>.har
+    →  ./<category>_{model}_{dataset_run}_1/<category>_responses_{model}_{dataset_run}_1/response-prompt-<id>.txt
+    """
+    m = PROMPT_ID_RE.search(har_filename)
+    if not m:
+        return None
+    prompt_id = m.group(1)
+    base = har_dir.parent  # ./<category>_{model}_{dataset_run}_1
+    resp_dir = base / f"{category}_responses_{model}_{dataset_run}_1"
+    return resp_dir / f"response-prompt-{prompt_id}.txt"
+
+def replace_marker_in_response_file(resp_path: Path, answer_text: str) -> bool:
+    """
+    Replace the single line '[no answer captured]' with answer_text.
+    Returns True if replaced, False otherwise.
+    """
+    if not resp_path or not resp_path.exists():
+        return False
+    try:
+        txt = resp_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        txt = resp_path.read_text(encoding="utf-8", errors="replace")
+
+    # Replace exactly one occurrence of the marker line
+    # Support optional surrounding whitespace/newlines around marker line.
+    # We’ll do a conservative replace: the literal marker once.
+    if MARKER in txt:
+        new_txt = txt.replace(MARKER, answer_text, 1)
+        resp_path.write_text(new_txt, encoding="utf-8")
+        return True
+    return False
+
+
+# ======================================
+# Main har_parser starting function
+# ======================================
 
 def har_parser(har_list: List[str]) -> List[Dict[str, Any]]:
     """
-    Entry point: processes HAR files for the chatgpt conversation endpoint
-    and prints totals of search strings and URLs.
+    Entry point: processes HAR files for ChatGPT or Claude.
+    Returns a list of result dicts. Each dict contains extracted queries, URLs, and metrics.
     """
-    target = "https://chatgpt.com/backend-api/f/conversation"
-    results = process_har_files(har_list, target)
+    results: List[Dict[str, Any]] = []
+    for har_path in har_list:
+        try:
+            # First, try as ChatGPT HAR
+            try:
+                chatgpt_target = "https://chatgpt.com/backend-api/f/conversation"
+                res = process_har_files([har_path], chatgpt_target)
+                # process_har_files returns a list, so unwrap
+                r = res[0]
+                if not r.get("error"):
+                    r["source"] = "chatgpt"
+                    results.append(r)
+                    continue  # done with this HAR
+            except Exception:
+                pass
+
+            # If not ChatGPT, try Claude
+            metrics = find_and_parse_claude_completion(har_path)
+            events = parse_sse_stream(metrics.get("content_text", "") or "")
+            queries = extract_claude_queries(events)
+            accessed, cited = count_urls_claude(events)
+            answer = reconstruct_answer_from_sse(events)
+
+            results.append({
+                "harname": har_path,
+                "source": "claude",
+                "search_strings": queries,
+                "url": accessed,
+                "cited_url": cited,
+                "answer": answer,
+                "metrics": metrics,
+                "n_accessed": len(accessed),
+                "n_cited": len(cited),
+            })
+
+        except Exception as e:
+            results.append({"harname": har_path, "error": str(e)})
 
     # Summarize totals
-    total_searches = sum(len(r.get('search_strings', [])) for r in results if not r.get('error'))
-    total_urls = sum(len(r.get('url', [])) for r in results if not r.get('error'))
+    total_searches = sum(len(r.get("search_strings", [])) for r in results if not r.get("error"))
+    total_urls = sum(len(r.get("url", [])) for r in results if not r.get("error"))
     for r in results:
         print(r.get('url'))
         print(r.get('search_strings'))

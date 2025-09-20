@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Use your current parser helpers
-from chatgpt_scraper.har_parser import process_har_files
+from chatgpt_scraper.har_parser import har_parser
 
 # Match result subdirs like: network-logs-prompt-249 or network-logs-prompt-249_20250814_011917
 RESULTS_DIR_PATTERN = re.compile(r"^network-logs-prompt-(?P<prompt_id>\d+)(?:_.*)?$", re.I)
@@ -83,9 +83,9 @@ def aggregate_results(har_paths: List[Path], version: str) -> Dict[str, Any]:
     if not har_paths:
         return {"hars": [], "error": "No HARs found"}
 
-    parsed: List[Dict[str, Any]] = process_har_files(
+    parsed: List[Dict[str, Any]] = har_parser(
         [str(p) for p in har_paths],
-        target_url="https://chatgpt.com/backend-api/f/conversation",
+        # target_url="https://chatgpt.com/backend-api/f/conversation",
     )
 
     all_search_strings: List[str] = []

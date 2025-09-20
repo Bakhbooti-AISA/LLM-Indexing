@@ -5,6 +5,8 @@ from datetime import datetime
 
 from serp_scrapers.bing_scraper import scrape_bing_to_csv
 from serp_scrapers.google_scraper import scrape_google_to_csv  # if available
+from serp_scrapers.brave_scraper import scrape_brave_to_csv
+from serp_scrapers.duckduckgo_scraper import scrape_duckduckgo_to_csv
 from evaluators.evaluation import check_urls  # URL evaluation helper
 from chatgpt_scraper.har_parser import har_parser  # For parsing .har files
 
@@ -18,7 +20,7 @@ def parse_args():
     )
     parser.add_argument(
         '-s', '--search-engines', nargs='+', default=['bing', 'google'],
-        choices=['bing', 'google'],
+        choices=['bing', 'google', 'brave', 'ddg'],
         help='Which search engines to use'
     )
     parser.add_argument(
@@ -56,13 +58,7 @@ def main():
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
     # Parse HAR files
-    model = None
-    if args.gpt5:
-        model = 'gpt5'
-    else:
-        model = 'gpt-o4'
     parsed_entries = har_parser(args.har_files)
-    # parsed_entries = har_parser(args.har_files)
     printLog("All .har files parsed")
     # return
 
@@ -112,11 +108,26 @@ def main():
                         max_results=args.max_se_index,
                         page_size=args.index_interval
                     )
+                elif engine == 'brave':
+                    printLog("Running Brave for "+harname)
+                    scrape_brave_to_csv(
+                        query=query,
+                        output_file=csv_path,
+                        max_results=args.max_se_index,
+                        page_size=args.index_interval
+                    )
+                elif engine == 'ddg':
+                    printLog("Running DuckDuckGo for "+harname)
+                    scrape_duckduckgo_to_csv(
+                        query=query,
+                        output_file=csv_path,
+                        max_results=args.max_se_index,
+                        page_size=args.index_interval
+                    )
                 else:
                     print(f"Engine '{engine}' not supported. Skipping.")
 
         # Prepare URL list file (merge and dedupe)
-        # urls = set(entry.get('url', []) + entry.get('cited_url', []))
         urls = set(entry.get('url', []))
         urls_txt = os.path.join(folder, f"urls_to_eval_{timestamp}.txt")
         with open(urls_txt, 'w', encoding='utf-8') as f:
