@@ -6,7 +6,6 @@ import sys
 import urllib.parse
 import http.client
 from urllib.parse import urlparse
-from oxylabs import RealtimeClient
 from bs4 import BeautifulSoup
 
 # ————— Configuration ————— #
@@ -19,9 +18,9 @@ EXCLUDED_DOMAINS = {
     # add more if needed
 }
 
-# # Oxylabs credentials (set these in your environment)
-# OXY_USERNAME = os.getenv("OXY_USERNAME")
-# OXY_PASSWORD = os.getenv("OXY_PASSWORD")
+# Oxylabs credentials (set these in your environment)
+OXY_USERNAME = os.getenv("OXY_USERNAME")
+OXY_PASSWORD = os.getenv("OXY_PASSWORD")
 
 # WebScrapingAPI credentials (you can also set this in your env)
 WSA_API_KEY = os.getenv("WSA_API_KEY")
@@ -172,7 +171,6 @@ def resolve_bing_redirect(href: str) -> str:
                 # print(cand_dec)
                 return _drop_tracking_params(cand_dec)
 
-
         # Fallback: sometimes the only http(s) appears percent-encoded in the query
         from re import search
         m = search(r"(https?%3A%2F%2F[^&]+)", p.query)
@@ -186,125 +184,140 @@ def resolve_bing_redirect(href: str) -> str:
 
 
 ####
+# ===================== OXYLABS (requests-based) =====================
+import requests
 
-# # Initialize a single RealtimeClient for all requests
-# client = RealtimeClient(OXY_USERNAME, OXY_PASSWORD)
-# # —————————————————————— #
-
-# def fetch_bing_results(query, start, batch_size):
-#     """
-#     Fetch one page of Bing results via Oxylabs Realtime API.
-#     On 403 (credits exhausted), exit the whole program.
-#     """
-#     # Pick a random East-Coast ZIP code each time
-#     geo = random.choice(EAST_COAST_ZIPCODES)
-
-#     # Oxylabs pages are 1-based
-#     page_num = (start - 1) // batch_size + 1
-
-#     try:
-#         resp = client.bing.scrape_search(
-#             query,
-#             start_page=page_num,
-#             pages=1,
-#             limit=batch_size,
-#             parse=True,
-#             geo_location=geo
-#         )
-#     except Exception as e:
-#         # try to detect a 403 from the SDK exception
-#         code = getattr(e, "status_code", None)
-#         if code == 403 or "403" in str(e):
-#             print("ERROR: Oxylabs free-trial credits exhausted (HTTP 403).")
-#             sys.exit(1)
-#         # otherwise, re-raise so outer loop can retry/log
-#         raise
-
-#     results = []
-#     for page in resp.results:
-#         organic = page.content.get("results", {}).get("organic", [])
-#         for item in organic:
-#             title = item.get("title")
-#             link  = item.get("link") or item.get("url")
-#             if not title or not link:
-#                 continue
-
-#             # domain exclusion logic
-#             domain = urlparse(link).netloc.lower()
-#             if domain in EXCLUDED_DOMAINS:
-#                 print(f"Domain Excluded: {domain}")
-#                 continue
-
-#             results.append((title, link))
-
-#     return results
+# ===================== OXYLABS (requests-based, fixed payload) =====================
+import requests
 
 def fetch_bing_results(query, start, batch_size):
     """
-    Fetch one page of Bing results via WebScrapingAPI.
+    Fetch one page of Bing results via Oxylabs Realtime API (no SDK).
     Returns up to batch_size (title, link) tuples, skipping excluded domains.
     """
-    # build the actual Bing URL you want proxied
-    bing_url = (
-        "https://www.bing.com/search?"
-        + urllib.parse.urlencode({
-            "q": query,
-            "count": batch_size,
-            "offset": start-1,    # Bing’s “first” param is 1-based index
-        })
-    )
+    if not OXY_USERNAME or not OXY_PASSWORD:
+        raise RuntimeError("Missing OXY_USERNAME / OXY_PASSWORD environment variables.")
 
-    # make the proxied request
-    conn = http.client.HTTPSConnection(WSA_HOST)
-    params = urllib.parse.urlencode({
-        "api_key": WSA_API_KEY,
-        "url": bing_url,
-        "render_js": False,
-        "country": "pk",
-    })
-    conn.request("GET", f"/v2?{params}")
-    resp = conn.getresponse()
-    # print(resp)
+    # Pick a random East-Coast ZIP code each call
+    geo = random.choice(EAST_COAST_ZIPCODES)
 
-    # if resp.status != 200:
-    #     print(f"Error fetching from WebScrapingAPI: HTTP {resp.status}")
-    #     sys.exit(1)
+    # Oxylabs pages are 1-based
+    page_num = (start) // batch_size + 1
 
-    html = resp.read().decode("utf-8")
-    soup = BeautifulSoup(html, "html.parser")
-    # print(html)
+    url = "https://realtime.oxylabs.io/v1/queries"
+
+    # IMPORTANT: single-object payload (not a list). 'query' must be a string.
+    payload = {
+        "source": "bing_search",
+        "query": query,
+        # "start_page": page_num,
+        **({"start_page": page_num} if page_num > 1 else {}),
+        "pages": 10,
+        # "limit": batch_size,
+        "parse": True,
+        # "geo_location": geo
+    }
+
+    try:
+        r = requests.post(
+            url,
+            auth=(OXY_USERNAME, OXY_PASSWORD),
+            json=payload,
+            timeout=220
+        )
+    except requests.RequestException as e:
+        raise RuntimeError(f"Network error talking to Oxylabs: {e}") from e
+
+    if r.status_code == 403:
+        print("ERROR: Oxylabs free-trial credits exhausted (HTTP 403).")
+        sys.exit(1)
+
+    if r.status_code != 200:
+        raise RuntimeError(f"Oxylabs HTTP {r.status_code}: {r.text[:300]}")
+
+    data = r.json()
 
     results = []
-    # Bing’s organic results are in <li class="b_algo">
-    for li in soup.select("li.b_algo")[:batch_size]:
-        h2 = li.find("h2")
-        if not h2 or not h2.a:
-            continue
-        title = h2.get_text(strip=True)
-        raw_link = h2.a.get("href", "")
 
-        # convert Bing redirect to the real URL
-        link = resolve_bing_redirect(raw_link)
+    # Oxylabs usually returns a list under 'results'
+    pages = data.get("results", [])
+    # (Some responses may return a single object; normalize)
+    if isinstance(pages, dict):
+        pages = [pages]
 
-        # domain exclusion
-        domain = urlparse(link).netloc.lower()
-        if domain in EXCLUDED_DOMAINS:
-            print(f"Domain Excluded: {domain}")
-            continue
+    for page in pages:
+        organic = (
+            page.get("content", {})
+                .get("results", {})
+                .get("organic", [])
+        )
+        for item in organic:
+            title = item.get("title")
+            raw_link = item.get("link") or item.get("url")
+            if not title or not raw_link:
+                continue
 
-        results.append((title, link))
+            link = resolve_bing_redirect(raw_link)
 
-    # be a good citizen
-    # time.sleep(random.uniform(*delay_range))
+            domain = urlparse(link).netloc.lower()
+            if domain in EXCLUDED_DOMAINS:
+                print(f"Domain Excluded: {domain}")
+                continue
+
+            results.append((title, link))
+
     return results
+
+
+# ===================== WebScrapingAPI (kept for reference; now disabled) =====================
+# def fetch_bing_results(query, start, batch_size):
+#     """
+#     Fetch one page of Bing results via WebScrapingAPI.
+#     Returns up to batch_size (title, link) tuples, skipping excluded domains.
+#     """
+#     bing_url = (
+#         "https://www.bing.com/search?"
+#         + urllib.parse.urlencode({
+#             "q": query,
+#             "count": batch_size,
+#             "offset": start-1,    # Bing’s “first” param is 1-based index
+#         })
+#     )
+#
+#     conn = http.client.HTTPSConnection(WSA_HOST)
+#     params = urllib.parse.urlencode({
+#         "api_key": WSA_API_KEY,
+#         "url": bing_url,
+#         "render_js": False,
+#         "country": "pk",
+#     })
+#     conn.request("GET", f"/v2?{params}")
+#     resp = conn.getresponse()
+#
+#     html = resp.read().decode("utf-8")
+#     soup = BeautifulSoup(html, "html.parser")
+#
+#     results = []
+#     for li in soup.select("li.b_algo")[:batch_size]:
+#         h2 = li.find("h2")
+#         if not h2 or not h2.a:
+#             continue
+#         title = h2.get_text(strip=True)
+#         raw_link = h2.a.get("href", "")
+#         link = resolve_bing_redirect(raw_link)
+#         domain = urlparse(link).netloc.lower()
+#         if domain in EXCLUDED_DOMAINS:
+#             print(f"Domain Excluded: {domain}")
+#             continue
+#         results.append((title, link))
+#     return results
+
+# ===================== Remainder unchanged =====================
 
 def scrape_bing_to_csv(query, output_file, max_results, batch_size):
     # Remove existing file so each run starts fresh
     if os.path.exists(output_file):
         os.remove(output_file)
-
-    # # OVERRIDE USER
-    # batch_size=20
 
     total_written = 0
     header_written = False
@@ -319,7 +332,6 @@ def scrape_bing_to_csv(query, output_file, max_results, batch_size):
             # Append this batch to CSV
             with open(output_file, "a", newline="", encoding="utf-8") as csvfile:
                 writer = csv.writer(csvfile)
-                # write header once
                 if not header_written:
                     writer.writerow(["Page Title", "URL"])
                     header_written = True
@@ -332,6 +344,8 @@ def scrape_bing_to_csv(query, output_file, max_results, batch_size):
 
         except Exception as e:
             print(f"Error at offset {offset}: {e}. Retrying after delay.")
-        time.sleep(random.uniform(*delay_range))
+            break
+        break
+        # time.sleep(random.uniform(*delay_range))
 
     print(f"\nDone! {total_written} total results saved to {output_file}")
