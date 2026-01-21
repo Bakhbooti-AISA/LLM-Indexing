@@ -138,13 +138,16 @@ def build_structure(root_dir: str = '.', categories: list = None) -> dict:
         all_csvs = sorted(glob.glob(os.path.join(set_path, '*.csv')))
         bing_csvs = [p for p in all_csvs if 'bing' in os.path.basename(p).lower()]
         google_csvs = [p for p in all_csvs if 'google' in os.path.basename(p).lower()]
+        brave_csvs = [p for p in all_csvs if 'brave' in os.path.basename(p).lower()]
 
         bing_grouped = load_csv_results(bing_csvs)
         google_grouped = load_csv_results(google_csvs)
+        brave_grouped = load_csv_results(brave_csvs)
 
         # Flatten grouped into lists
         bing_entries = [entry for _, entries in bing_grouped for entry in entries]
         google_entries = [entry for _, entries in google_grouped for entry in entries]
+        brave_entries = [entry for _, entries in brave_grouped for entry in entries]
 
         # 4) Assemble
         aggregated[category][set_id] = {
@@ -152,7 +155,8 @@ def build_structure(root_dir: str = '.', categories: list = None) -> dict:
             'urls_cited': urls_cited,       # from new 'cites' (or old 'cited_urls')
             'search_string': search_strings,
             'bing_urls': bing_entries,
-            'google_urls': google_entries
+            'google_urls': google_entries,
+            'brave_urls': brave_entries
         }
 
     return aggregated

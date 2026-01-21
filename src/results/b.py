@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
 """
 Write per-category lists of HAR files (absolute paths, one per line) showing
-which have / haven't had Bing/Google scrapes.
+which have / haven't had Bing/Google/Brave scrapes.
 
 Rules:
-- If a HAR has **neither** Bing nor Google -> goes **only** to `missing_both__<category>.txt`.
-- `missing_bing__<category>.txt` = has Google but not Bing (only-one-missing).
-- `missing_google__<category>.txt` = has Bing but not Google (only-one-missing).
-- `has_bing__<category>.txt` = any HAR with Bing results (regardless of Google).
-- `has_google__<category>.txt` = any HAR with Google results (regardless of Bing).
+- If a HAR has **none** of Bing, Google, or Brave -> goes **only** to `missing_all__<category>.txt`.
+- `missing_bing__<category>.txt`  = has **both** Google and Brave but **not** Bing (only-one-missing).
+- `missing_google__<category>.txt`= has **both** Bing and Brave but **not** Google (only-one-missing).
+- `missing_brave__<category>.txt` = has **both** Bing and Google but **not** Brave (only-one-missing).
+- `has_bing__<category>.txt`   = any HAR with Bing results (regardless of others).
+- `has_google__<category>.txt` = any HAR with Google results (regardless of others).
+- `has_brave__<category>.txt`  = any HAR with Brave results (regardless of others).
 - `unmatched_hars__<category>.txt` = HAR exists in datasets but no matching entry in aggregated.json.
+
+Notes:
+- We keep the "only-one-missing" semantics for the per-engine `missing_*` files, now generalized
+  to three engines (i.e., exactly one missing, the other two present).
+- If a HAR has exactly one or two engines present (but not all, not none), it will **not** appear
+  in any `missing_*` list unless it matches the *only-one-missing* condition above. It will always
+  appear in the corresponding `has_*` lists for whichever engines it has.
 
 Mapping:
   datasets/<category>/*hars*/network-logs-prompt-<ID>.har
   ↔ aggregated[<category>][set_id], where set_id begins with "network-logs-prompt-<ID>_" (timestamp ignored)
 
 Usage:
-  python per_category_scrape_status.py \
+  python per_category_scrape_status_3engines.py \
     --aggregated /path/to/aggregated.json \
     --datasets-root /path/to/datasets \
     --output-dir /path/to/output_lists
@@ -33,6 +42,13 @@ PREFIX = "network-logs-prompt-"
 CATEGORY_SYNONYMS = {
     "instramental": "instrumental",
     "instrumental": "instramental",
+}
+
+SEARCH_ENGINES = ("bing", "google", "brave")
+URL_KEYS = {
+    "bing": "bing_urls",
+    "google": "google_urls",
+    "brave": "brave_urls",
 }
 
 def load_aggregated(path: Path) -> Dict[str, Any]:
@@ -105,7 +121,7 @@ def write_lines(path: Path, lines: List[str]) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Per-category lists of HARs by Bing/Google scrape status.")
+    ap = argparse.ArgumentParser(description="Per-category lists of HARs by Bing/Google/Brave scrape status.")
     ap.add_argument("--aggregated", required=True, help="Path to aggregated.json")
     ap.add_argument("--datasets-root", required=True, help="Path to datasets root")
     ap.add_argument("--output-dir", default=None, help="Directory to write per-category files (default: alongside aggregated.json)")
@@ -133,11 +149,14 @@ def main():
         if not hars:
             continue
 
-        has_bing: List[str] = []
-        missing_bing: List[str] = []
-        has_google: List[str] = []
-        missing_google: List[str] = []
-        missing_both: List[str] = []
+        # "has_*" lists (independent)
+        has_lists: Dict[str, List[str]] = {engine: [] for engine in SEARCH_ENGINES}
+
+        # "missing_*" lists (ONLY-ONE-MISSING: present in other two, absent in this one)
+        missing_only_one: Dict[str, List[str]] = {engine: [] for engine in SEARCH_ENGINES}
+
+        # Other buckets
+        missing_all: List[str] = []
         unmatched: List[str] = []
 
         for har in hars:
@@ -155,36 +174,50 @@ def main():
                 continue
 
             _, entry = set_info
-            bing = entry.get("bing_urls", []) or []
-            google = entry.get("google_urls", []) or []
 
-            has_b = len(bing) > 0
-            has_g = len(google) > 0
+            # Presence booleans per engine
+            present: Dict[str, bool] = {}
+            for engine in SEARCH_ENGINES:
+                urls = entry.get(URL_KEYS[engine], []) or []
+                present[engine] = len(urls) > 0
 
-            # Always track "has" lists independently
-            if has_b:
-                has_bing.append(str(har))
-            if has_g:
-                has_google.append(str(har))
+            # Track has_* (independent)
+            for engine, is_present in present.items():
+                if is_present:
+                    has_lists[engine].append(str(har))
 
-            # Missing logic per requirement:
-            # - If neither -> only in missing_both
-            # - If exactly one missing -> in that specific missing list
-            if (not has_b) and (not has_g):
-                missing_both.append(str(har))
-            elif (not has_b) and has_g:
-                missing_bing.append(str(har))
-            elif has_b and (not has_g):
-                missing_google.append(str(har))
+            # Missing buckets
+            num_present = sum(present.values())
+            if num_present == 0:
+                # none present → goes ONLY to missing_all
+                missing_all.append(str(har))
+            elif num_present == 2:
+                # exactly one missing → drop into that specific engine's missing list
+                for engine, is_present in present.items():
+                    if not is_present:
+                        missing_only_one[engine].append(str(har))
+                        break
+            # For num_present == 1 (two missing) or num_present == 3 (none missing),
+            # we don't add to any missing_* list by design; has_* already records presence.
 
         prefix = ds_cat
-        write_lines(out_dir / f"has_bing__{prefix}.txt", has_bing)
-        write_lines(out_dir / f"missing_bing__{prefix}.txt", missing_bing)
-        write_lines(out_dir / f"has_google__{prefix}.txt", has_google)
-        write_lines(out_dir / f"missing_google__{prefix}.txt", missing_google)
-        write_lines(out_dir / f"missing_both__{prefix}.txt", missing_both)
+
+        # Write has_* files
+        write_lines(out_dir / f"has_bing__{prefix}.txt", has_lists["bing"])
+        write_lines(out_dir / f"has_google__{prefix}.txt", has_lists["google"])
+        write_lines(out_dir / f"has_brave__{prefix}.txt", has_lists["brave"])
+
+        # Write missing (only-one-missing) files
+        write_lines(out_dir / f"missing_bing__{prefix}.txt", missing_only_one["bing"])
+        write_lines(out_dir / f"missing_google__{prefix}.txt", missing_only_one["google"])
+        write_lines(out_dir / f"missing_brave__{prefix}.txt", missing_only_one["brave"])
+
+        # Write missing_all & unmatched
+        write_lines(out_dir / f"missing_all__{prefix}.txt", missing_all)
         write_lines(out_dir / f"unmatched_hars__{prefix}.txt", unmatched)
-        total_written += 6
+
+        # files written for this category
+        total_written += 8  # 3 has_* + 3 missing_* + missing_all + unmatched
 
     print(f"Wrote per-category lists to {out_dir} (files written: {total_written})")
 
